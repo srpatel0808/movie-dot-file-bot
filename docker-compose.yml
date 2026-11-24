@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  watermark-bot:
+    build: .
+    container_name: telegram_watermark_bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      # Persist SQLite database, custom watermarks, and settings across container restarts
+      - ./data:/app/data
+      - ./assets:/app/assets
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

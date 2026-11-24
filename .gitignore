@@ -1,0 +1,13 @@
+# Environment secrets (keeps bot token safe from public exposure)
+.env
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local test & temporary files
+data/bot_database.db
+*.mp4
+*.tmp
+temp_video_*
