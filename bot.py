@@ -1,18 +1,15 @@
 """
-Telegram Thumbnail & Watermark Bot - Main Application.
+MOVIE DOT — Dedicated Telegram Movie File Management & Delivery Bot.
 Features:
-- Automatic thumbnail watermarking with 100% original quality preservation
-- Video Thumbnail Changer: extract, replace, watermark, and send back MP4 videos with ZERO re-encoding
-- Registered Telegram Command Menu (/start, /help, /thumbnail, /watermark, /settings, /cancel)
-- Interactive Admin Panel with 9-position placement, scale, opacity, live preview, and broadcast
-- Multi-upload support for photos, uncompressed documents, and videos
+- Automatic Movie Indexing from channel uploads or admin forwards (MKV, MP4)
+- Automatic Quality Detection (480p, 720p, 1080p, 2160p / 4K)
+- Single-Button 'GET ALL FILES' Deep Linking System
+- Mandatory Channel Subscription Verification (Force Join) with instant resume
+- Instant zero-bandwidth delivery using stored Telegram file_id values
+- Prevention of duplicate file entries
+- Multi-user concurrent async processing
 """
 
-import io
-import os
-import sys
-import shutil
-import tempfile
 import logging
 from pathlib import Path
 from typing import Optional
@@ -21,7 +18,6 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputFile,
     BotCommand,
     BotCommandScopeDefault
 )
@@ -37,13 +33,10 @@ from telegram.ext import (
 from config import (
     BOT_TOKEN,
     ADMIN_IDS,
-    SUPPORTED_EXTENSIONS,
-    MAX_FILE_SIZE_MB,
-    DEFAULT_SETTINGS
+    BOT_USERNAME
 )
 from database import db
-from watermark_engine import watermark_engine
-from video_engine import video_engine
+import movie_engine
 import admin
 
 # Clean logging setup
@@ -51,66 +44,65 @@ logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(name)s: %(message)s",
     level=logging.INFO
 )
-logger = logging.getLogger("WatermarkBot")
+logger = logging.getLogger("MovieDot")
 
 
 # ==================== STARTUP & COMMAND REGISTRATION ====================
 
 async def post_init(application: Application):
-    """Registers bot commands with Telegram's Bot API so they appear in the / menu."""
+    """Registers official Movie Dot bot commands with Telegram's Bot API."""
     commands = [
-        BotCommand("start", "Start the bot"),
-        BotCommand("help", "Show instructions"),
-        BotCommand("thumbnail", "Upload or change thumbnail"),
-        BotCommand("watermark", "Apply custom watermark (Admin only)"),
-        BotCommand("settings", "Bot settings"),
-        BotCommand("cancel", "Cancel current operation")
+        BotCommand("start", "Start the bot / access movie files"),
+        BotCommand("help", "How to use Movie Dot"),
+        BotCommand("movies", "View all indexed movies (Admin)"),
+        BotCommand("setchannel", "Set force-join subscription channel (Admin)"),
+        BotCommand("admin", "Admin Control Panel (Admin)"),
+        BotCommand("cancel", "Cancel active operation")
     ]
     try:
         await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-        logger.info("Bot commands successfully registered with Telegram Bot API.")
+        logger.info("Movie Dot commands registered with Telegram Bot API.")
     except Exception as e:
         logger.error(f"Failed to register bot commands: {e}", exc_info=True)
 
 
-# ==================== COMMAND HANDLERS ====================
+# ==================== HOME SCREEN & COMMAND HANDLERS ====================
+
+def get_home_markup(user_id: int) -> InlineKeyboardMarkup:
+    """Builds the clean MOVIE DOT home menu, displaying admin options only to the bot owner."""
+    keyboard = []
+    if admin.is_admin(user_id):
+        keyboard.append([InlineKeyboardButton("🎬 Manage Movies", callback_data="adm_movies")])
+
+    keyboard.append([InlineKeyboardButton("📥 GET ALL FILES", callback_data="user_get_all_files")])
+    keyboard.append([InlineKeyboardButton("ℹ️ How to Use", callback_data="user_help")])
+
+    return InlineKeyboardMarkup(keyboard)
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /start command."""
+    """Handles the /start command (including Telegram Deep Linking for movies)."""
     user = update.effective_user
     db.register_or_update_user(user.id, user.username, user.first_name)
 
-    is_user_admin = admin.is_admin(user.id)
+    # 1. Telegram Deep Linking (/start get_<movie_id> or /start <movie_id>)
+    if context.args and len(context.args) > 0:
+        param = context.args[0].strip()
+        await handle_movie_request(update, context, param, user)
+        return
 
-    keyboard = [
-        [
-            InlineKeyboardButton("📸 Upload Thumbnail", callback_data="user_cmd_thumbnail"),
-            InlineKeyboardButton("🎬 Video Changer", callback_data="user_cmd_video_info")
-        ],
-        [
-            InlineKeyboardButton("ℹ️ How to Use", callback_data="user_help"),
-            InlineKeyboardButton("👁️ Watermark Preview", callback_data="user_preview")
-        ]
-    ]
-    if is_user_admin:
-        keyboard.append([InlineKeyboardButton("🛠️ Admin Control Panel", callback_data="adm_main")])
-
+    # 2. Clean MOVIE DOT Home Screen
     welcome_text = (
-        f"👋 *Welcome, {user.first_name}!* 🎯\n\n"
-        "I am your automated **Telegram Thumbnail & Watermark Bot**.\n\n"
-        "✨ *Core Capabilities:*\n"
-        " • 📸 *Image Watermarking:* Send any image/thumbnail to instantly apply your brand watermark.\n"
-        " • 🎬 *Video Thumbnail Changer:* Send any MP4 video to extract, replace, or watermark its thumbnail with **zero video re-encoding**.\n"
-        " • 💎 *Original Quality:* 100% video and image resolution preserved.\n"
-        " • 📁 *Multi-Upload:* Send single files or albums without quality degradation.\n\n"
-        "👉 *Ready?* Simply send an **image** or **video** to get started!"
+        "🎬 *Welcome to MOVIE DOT!*\n\n"
+        "Your Movie File Management Bot."
     )
 
     await update.message.reply_text(
         welcome_text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=get_home_markup(user.id),
         parse_mode="Markdown"
     )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /help command."""
@@ -118,573 +110,552 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.register_or_update_user(user.id, user.username, user.first_name)
 
     help_text = (
-        "📖 *THUMBNAIL WATERMARK BOT - USER GUIDE*\n"
+        "📖 *MOVIE DOT — USER GUIDE*\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📸 *1. Watermarking Image Thumbnails:*\n"
-        " • Send your image directly as a **Photo** or as a **Document / File**.\n"
-        " • *Pro Tip:* Sending as **File (Uncompressed)** keeps 100% of the original HD/4K resolution.\n"
-        " • The bot automatically applies your watermark and sends it back.\n\n"
-        "🎬 *2. Changing Video Thumbnails:*\n"
-        " • Send an **MP4 video** (up to 20MB).\n"
-        " • The bot extracts the current thumbnail and presents action buttons:\n"
-        "   - *Watermark Existing Thumbnail*: Applies watermark to the video's current thumbnail.\n"
-        "   - *Upload New Thumbnail*: Upload any custom image to become the new thumbnail.\n"
-        "   - *Use Saved Thumbnail*: Apply your profile's saved custom thumbnail.\n"
-        " • Original video streams are copied directly (**no re-encoding**, zero quality loss).\n\n"
-        "📂 *3. Stored Custom Thumbnail:* Use `/thumbnail` to save a custom image you can reuse anytime.\n\n"
-        "⚙️ *4. Commands Menu:*\n"
-        " • `/start` - Start or restart the bot\n"
-        " • `/help` - View this help manual\n"
-        " • `/thumbnail` - Upload or change custom thumbnail\n"
-        " • `/watermark` - View or manage watermark (Admin)\n"
-        " • `/settings` - Bot preferences and admin controls\n"
-        " • `/cancel` - Cancel active operation\n"
+        "🎬 *How to Download Movie Files:*\n"
+        " 1. Browse movie posts in our official Telegram channel.\n"
+        " 2. Tap the **📥 GET ALL FILES** button on any movie post.\n"
+        " 3. If prompted, join our channel and click **✅ I'VE JOINED – VERIFY**.\n"
+        " 4. Select your preferred resolution (**480p**, **720p**, **1080p**, or **4K**).\n"
+        " 5. The movie file is delivered instantly directly to your chat!\n\n"
+        "⚙️ *Bot Commands:*\n"
+        " • `/start` – Open main menu or access movie link\n"
+        " • `/help` – View this user guide\n"
+        " • `/movies` – Manage movie collection (Admin)\n"
+        " • `/setchannel` – Set force-join channel (Admin)\n"
+        " • `/admin` – Open Admin Control Panel (Admin)\n"
+        " • `/cancel` – Cancel active operation\n"
         "━━━━━━━━━━━━━━━━━━━━━━"
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton("📸 Set Thumbnail", callback_data="user_cmd_thumbnail"),
-            InlineKeyboardButton("👁️ Preview Watermark", callback_data="user_preview")
-        ]
-    ]
-    if admin.is_admin(user.id):
-        keyboard.append([InlineKeyboardButton("🛠️ Admin Panel", callback_data="adm_main")])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 GET ALL FILES", callback_data="user_get_all_files")],
+        [InlineKeyboardButton("🏠 Main Menu", callback_data="user_home")]
+    ])
 
-    await update.message.reply_text(
-        help_text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(help_text, reply_markup=kb, parse_mode="Markdown")
 
-async def thumbnail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /thumbnail command (upload, view, or change user custom thumbnail)."""
-    user = update.effective_user
-    db.register_or_update_user(user.id, user.username, user.first_name)
-
-    stored_thumb = db.get_user_thumbnail(user.id)
-
-    if stored_thumb:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Upload New Thumbnail", callback_data="user_set_new_thumb")],
-            [InlineKeyboardButton("❌ Remove Saved Thumbnail", callback_data="user_del_thumb")],
-            [InlineKeyboardButton("👁️ Preview Watermark", callback_data="user_preview")]
-        ])
-        caption = (
-            "🖼️ *Your Active Saved Thumbnail*\n\n"
-            "This thumbnail is saved to your profile and can be automatically applied to your videos with one click!"
-        )
-        await update.message.reply_photo(
-            photo=stored_thumb,
-            caption=caption,
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
-    else:
-        db.set_user_state(user.id, "waiting_for_user_thumbnail")
-        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="user_cancel")]])
-        await update.message.reply_text(
-            "📸 *Upload Custom Thumbnail*\n\n"
-            "Please send your **thumbnail image** now (Photo or Document).\n\n"
-            "Once saved, you can attach it to any video or apply your watermark automatically!",
-            reply_markup=cancel_kb,
-            parse_mode="Markdown"
-        )
-
-async def preview_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /preview command."""
-    status_msg = await update.message.reply_text("⏳ Generating watermark preview...")
-    try:
-        preview_bytes = watermark_engine.generate_preview_thumbnail()
-        settings = db.get_all_settings()
-        pos = settings.get("position", DEFAULT_SETTINGS["position"]).replace("_", " ").title()
-        scale = settings.get("scale", DEFAULT_SETTINGS["scale"])
-        opacity = settings.get("opacity", DEFAULT_SETTINGS["opacity"])
-
-        caption = (
-            "👁️ *Current Watermark Placement Preview (1280x720 Canvas)*\n"
-            f"• Position: *{pos}*\n"
-            f"• Scale: *{scale}%*\n"
-            f"• Opacity: *{opacity}%*\n\n"
-            "Send any image or video to apply this watermark!"
-        )
-        await update.message.reply_photo(photo=preview_bytes, caption=caption, parse_mode="Markdown")
-        await status_msg.delete()
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Could not generate preview: {e}")
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancels any pending input or operation."""
+    """Cancels any pending admin input."""
     user = update.effective_user
     db.set_user_state(user.id, None)
-    db.clear_pending_video(user.id)
-    await update.message.reply_text("✅ Active operation cancelled. Send an image or video anytime!")
+    await update.message.reply_text("✅ Active operation cancelled. Use /start to return home.")
 
 
-# ==================== VIDEO THUMBNAIL CHANGER ====================
+# ==================== FORCE JOIN & MOVIE DELIVERY ====================
 
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handles uploaded videos.
-    Extracts existing thumbnail, checks size limits, and displays options for custom thumbnail replacement.
-    """
-    user = update.effective_user
-    db.register_or_update_user(user.id, user.username, user.first_name)
-
-    # Determine message object (video directly or sent as document)
-    msg = update.message
-    video = msg.video
-    doc = msg.document
-
-    if not video and doc:
-        # User sent video as document
-        mime = (doc.mime_type or "").lower()
-        ext = Path(doc.file_name or "").suffix.lower()
-        if not mime.startswith("video/") and ext not in [".mp4", ".mkv", ".mov", ".webm"]:
-            return  # Handled by document handler
-        # Treat as video
-        file_id = doc.file_id
-        file_name = doc.file_name or "video.mp4"
-        file_size = doc.file_size or 0
-        width = 0
-        height = 0
-        duration = 0
-        tg_thumb_obj = doc.thumbnail
-    else:
-        file_id = video.file_id
-        file_name = video.file_name or "video.mp4"
-        file_size = video.file_size or 0
-        width = video.width
-        height = video.height
-        duration = video.duration
-        tg_thumb_obj = video.thumbnail
-
-    # Check file size against Telegram Bot API 20MB download limit
-    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
-    if file_size > max_bytes:
-        size_mb = file_size / (1024 * 1024)
-        await msg.reply_text(
-            f"⚠️ *Video File Too Large*\n\n"
-            f"The Telegram Bot API limits bot file downloads to **{MAX_FILE_SIZE_MB}MB**.\n"
-            f"Your uploaded video is **{size_mb:.1f}MB**.\n\n"
-            "💡 *Solution:* Please compress or trim your video to under 20MB so the bot can download and process its thumbnail.",
-            parse_mode="Markdown"
-        )
-        return
-
-    status_msg = await msg.reply_text("🎬 *Analyzing video and extracting thumbnail...*", parse_mode="Markdown")
-
-    extracted_thumb_bytes = None
-    try:
-        # Extract thumbnail from Telegram thumbnail if available
-        if tg_thumb_obj:
-            thumb_file = await tg_thumb_obj.get_file()
-            extracted_thumb_bytes = bytes(await thumb_file.download_as_bytearray())
-
-        # If no Telegram thumbnail, extract using video_engine
-        if not extracted_thumb_bytes:
-            # Download small segment / full video to extract frame
-            vid_file = await context.bot.get_file(file_id)
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_vid:
-                tmp_vid_path = Path(tmp_vid.name)
-            await vid_file.download_to_drive(custom_path=tmp_vid_path)
-            extracted_thumb_bytes = video_engine.extract_thumbnail_from_video(tmp_vid_path, timestamp=1.0)
-            tmp_vid_path.unlink(missing_ok=True)
-
-        # Store pending video in database
-        db.set_pending_video(
-            user_id=user.id,
-            file_id=file_id,
-            file_name=file_name,
-            width=width,
-            height=height,
-            duration=duration,
-            file_size=file_size,
-            extracted_thumb=extracted_thumb_bytes
-        )
-
-        has_stored_thumb = db.has_user_thumbnail(user.id)
-        keyboard = []
-
-        if has_stored_thumb:
-            keyboard.append([InlineKeyboardButton("✨ Apply My Saved Thumbnail (Watermarked)", callback_data="vid_apply_stored")])
-
-        if extracted_thumb_bytes:
-            keyboard.append([InlineKeyboardButton("🏷️ Watermark Current Thumbnail & Update", callback_data="vid_watermark_current")])
-
-        keyboard.append([InlineKeyboardButton("📤 Upload New Custom Thumbnail", callback_data="vid_upload_new")])
-        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="user_cancel")])
-
-        info_caption = (
-            "🎬 *Video Received & Thumbnail Extracted!*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📁 *File:* `{file_name}`\n"
-            f"📐 *Resolution:* `{width} x {height}` px\n"
-            f"⏱️ *Duration:* `{duration}`s\n"
-            f"📦 *Size:* `{file_size / (1024*1024):.1f} MB`\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "Choose an action below to update this video's thumbnail:"
-        )
-
-        if extracted_thumb_bytes:
-            await msg.reply_photo(
-                photo=extracted_thumb_bytes,
-                caption=info_caption,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
-        else:
-            await msg.reply_text(
-                info_caption,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
-
-        await status_msg.delete()
-
-    except Exception as e:
-        logger.error(f"Error handling video: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ *Error processing video:*\n`{str(e)}`", parse_mode="Markdown")
-
-async def process_and_send_video(
+async def handle_movie_request(
+    update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    user_id: int,
-    raw_thumbnail_bytes: bytes,
-    original_message = None
+    param: str,
+    user
 ):
     """
-    Applies watermark to the thumbnail, attaches it to the MP4 video using stream-copy (no re-encoding),
-    and sends the updated video and high-resolution thumbnail back to the user.
+    Handles movie access via Deep Linking.
+    Enforces mandatory channel subscription before delivering files.
     """
-    pending = db.get_pending_video(user_id)
-    if not pending:
-        await context.bot.send_message(chat_id=chat_id, text="⚠️ No pending video found. Please upload your video again.")
-        return
+    clean_id = param
+    for prefix in ["get_", "movie_", "files_", "dl_"]:
+        if clean_id.lower().startswith(prefix):
+            clean_id = clean_id[len(prefix):]
+            break
 
-    status_msg = await context.bot.send_message(
-        chat_id=chat_id,
-        text="⚡ *Applying watermark and replacing video thumbnail without re-encoding...*",
-        parse_mode="Markdown"
-    )
+    movie = db.get_movie(clean_id)
+    if not movie and clean_id != param:
+        movie = db.get_movie(param)
+    if not movie:
+        movie = db.find_movie_by_title_or_year(clean_id.replace("_", " "))
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="tg_video_"))
-    try:
-        # 1. Apply watermark to the chosen thumbnail
-        watermarked_bytes, out_fmt, thumb_dims = watermark_engine.apply_watermark(raw_thumbnail_bytes)
+    if not movie:
+        logger.warning(f"Deep link requested unknown movie param: '{param}' (cleaned: '{clean_id}')")
+        force_chan = db.get_force_sub_channel()
+        keyboard = []
+        if force_chan:
+            chan_url = f"https://t.me/{force_chan.lstrip('@')}" if not force_chan.startswith("-100") else None
+            if chan_url:
+                keyboard.append([InlineKeyboardButton("📢 Visit Channel", url=chan_url)])
+        keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="user_home")])
 
-        # 2. Download original video
-        input_vid_path = temp_dir / "input_video.mp4"
-        file_obj = await context.bot.get_file(pending["file_id"])
-        await file_obj.download_to_drive(custom_path=input_vid_path)
-
-        # 3. Save watermarked thumbnail to disk
-        thumb_path = temp_dir / f"watermarked_thumb.{out_fmt.lower()}"
-        thumb_path.write_bytes(watermarked_bytes)
-
-        # 4. Replace thumbnail inside MP4 container without re-encoding
-        output_vid_path = temp_dir / f"{Path(pending['file_name'] or 'video').stem}_watermarked.mp4"
-        success = video_engine.replace_video_thumbnail(input_vid_path, thumb_path, output_vid_path)
-
-        if not success or not output_vid_path.exists():
-            # Fallback to input video if container replacement failed
-            output_vid_path = input_vid_path
-
-        # 5. Create Telegram-optimized preview thumbnail (JPEG, <200KB, <=320px)
-        tg_preview_thumb = video_engine.create_telegram_thumbnail_preview(watermarked_bytes)
-
-        # 6. Send updated video back
-        video_caption = (
-            "✅ *Video Thumbnail Successfully Updated!*\n"
+        await update.message.reply_text(
+            "⚠️ *Movie Not Found*\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "💎 *100% Original Video Quality Preserved* (Zero re-encoding)\n"
-            f"📐 *Resolution:* `{pending['width']} x {pending['height']}` px\n"
-            f"⏱️ *Duration:* `{pending['duration']}`s\n"
-            "🏷️ Custom watermark applied."
-        )
-
-        with open(output_vid_path, "rb") as vid_fh:
-            await context.bot.send_video(
-                chat_id=chat_id,
-                video=vid_fh,
-                thumbnail=tg_preview_thumb,
-                caption=video_caption,
-                supports_streaming=True,
-                width=pending["width"] if pending["width"] > 0 else None,
-                height=pending["height"] if pending["height"] > 0 else None,
-                duration=pending["duration"] if pending["duration"] > 0 else None,
-                parse_mode="Markdown"
-            )
-
-        # 7. Also deliver the standalone high-res watermarked thumbnail document
-        doc_name = f"{Path(pending['file_name'] or 'thumbnail').stem}_watermarked_thumb.{out_fmt.lower()}"
-        doc_file = InputFile(io.BytesIO(watermarked_bytes), filename=doc_name)
-        await context.bot.send_document(
-            chat_id=chat_id,
-            document=doc_file,
-            caption="🖼️ *Standalone Watermarked Thumbnail* (Full HD file for YouTube / Web)",
+            "Sorry, the requested movie files could not be found or have been removed.\n\n"
+            "Please check the latest post in our channel or contact the administrator.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
-
-        # Update stats and cleanup
-        db.increment_processed(user_id)
-        db.clear_pending_video(user_id)
-        db.set_user_state(user_id, None)
-
-        await status_msg.delete()
-
-    except Exception as e:
-        logger.error(f"Error in process_and_send_video: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ *Failed to update video thumbnail:*\n`{str(e)}`", parse_mode="Markdown")
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-# ==================== IMAGE PROCESSING HANDLERS ====================
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes incoming photo messages."""
-    user = update.effective_user
-    db.register_or_update_user(user.id, user.username, user.first_name)
-    user_state = db.get_user_state(user.id)
-
-    # 1. Admin uploading new default watermark
-    if admin.is_admin(user.id) and user_state == "waiting_for_watermark":
-        await save_watermark_from_message(update, context, is_document=False)
         return
 
-    # 2. User uploading image specifically for a pending video
-    if user_state == "waiting_for_video_thumbnail":
-        photo = update.message.photo[-1]
-        file_obj = await photo.get_file()
-        raw_bytes = await file_obj.download_as_bytearray()
-        await process_and_send_video(context, update.effective_chat.id, user.id, bytes(raw_bytes))
+    # Check if movie has files
+    files = db.get_movie_files(movie["movie_id"])
+    if not files:
+        keyboard = [[InlineKeyboardButton("🏠 Main Menu", callback_data="user_home")]]
+        await update.message.reply_text(
+            f"🎬 *{movie['title']}*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ *Files Currently Unavailable*\n\n"
+            "No download files are currently attached to this movie.\n"
+            "Please check back shortly!",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
         return
 
-    # 3. User uploading custom thumbnail via /thumbnail command
-    if user_state == "waiting_for_user_thumbnail":
-        photo = update.message.photo[-1]
-        file_obj = await photo.get_file()
-        raw_bytes = await file_obj.download_as_bytearray()
-        db.set_user_thumbnail(user.id, bytes(raw_bytes))
-        db.set_user_state(user.id, None)
+    # MANDATORY CHANNEL SUBSCRIPTION CHECK (FORCE JOIN)
+    # Bot owners/admins bypass verification
+    if not admin.is_admin(user.id):
+        force_chan = db.get_force_sub_channel()
+        if force_chan:
+            is_member, status_reason, channel_url = await movie_engine.check_channel_membership(
+                bot=context.bot,
+                user_id=user.id,
+                channel=force_chan
+            )
+            if not is_member:
+                logger.info(f"User {user.id} denied access to {movie['movie_id']}: not in channel {force_chan} (status={status_reason})")
+                force_text, force_markup = movie_engine.format_force_sub_message(channel_url, movie["movie_id"])
+                await update.message.reply_text(
+                    force_text,
+                    reply_markup=force_markup,
+                    parse_mode="Markdown"
+                )
+                return
 
-        # If user also had a pending video, ask if they want to apply it now!
-        pending = db.get_pending_video(user.id)
-        if pending:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎬 Apply to My Pending Video", callback_data="vid_apply_stored")],
-                [InlineKeyboardButton("✅ Just Keep as Saved Thumbnail", callback_data="user_cancel")]
-            ])
-            await update.message.reply_photo(
-                photo=bytes(raw_bytes),
-                caption="✅ *Custom Thumbnail Saved!*\nWould you like to attach this to your uploaded video now?",
-                reply_markup=kb,
+    # User is subscribed (or admin): show available movie qualities
+    await show_movie_qualities_screen(update.message, movie, files)
+
+
+async def show_movie_qualities_screen(message, movie: dict, files: list, is_edit: bool = False):
+    """
+    Renders the movie quality selection screen.
+    Only shows qualities that actually exist in the database.
+    """
+    qualities_bullet_list = "\n".join([f"- {f['quality']}" for f in files])
+
+    caption = (
+        f"🎬 *{movie['title']}*\n\n"
+        f"📥 *Select Your Quality:*\n\n"
+        f"{qualities_bullet_list}"
+    )
+
+    keyboard = movie_engine.format_quality_selection_keyboard(movie["movie_id"], files)
+
+    if is_edit:
+        try:
+            await message.edit_text(caption, reply_markup=keyboard, parse_mode="Markdown")
+            return
+        except Exception:
+            pass
+
+    if movie.get("poster_file_id"):
+        try:
+            await message.reply_photo(
+                photo=movie["poster_file_id"],
+                caption=caption,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+            return
+        except Exception as e:
+            logger.warning(f"Could not send poster: {e}")
+
+    await message.reply_text(caption, reply_markup=keyboard, parse_mode="Markdown")
+
+
+async def send_movie_file(query, context: ContextTypes.DEFAULT_TYPE, movie_id: str, quality: str):
+    """Sends a single movie file using stored Telegram file_id without downloading or re-uploading."""
+    user = query.from_user
+
+    # Re-verify channel subscription before file delivery (in case user left)
+    if not admin.is_admin(user.id):
+        force_chan = db.get_force_sub_channel()
+        if force_chan:
+            is_member, _, channel_url = await movie_engine.check_channel_membership(
+                bot=context.bot,
+                user_id=user.id,
+                channel=force_chan
+            )
+            if not is_member:
+                await query.answer("⚠️ Subscription required!", show_alert=True)
+                force_text, force_markup = movie_engine.format_force_sub_message(channel_url, movie_id)
+                await query.message.reply_text(force_text, reply_markup=force_markup, parse_mode="Markdown")
+                return
+
+    await query.answer(f"Sending {quality}...")
+
+    movie = db.get_movie(movie_id)
+    movie_title = movie["title"] if movie else "Movie"
+
+    file_record = db.get_movie_file_by_quality(movie_id, quality)
+    if not file_record:
+        await query.message.reply_text(
+            f"⚠️ *File Unavailable*\nThe {quality} version is no longer in the database.",
+            parse_mode="Markdown"
+        )
+        return
+
+    file_id = file_record["file_id"]
+    file_name = file_record.get("file_name", "movie.mp4")
+    file_size_str = movie_engine.format_size(file_record.get("file_size", 0))
+
+    caption = (
+        f"🎬 *{movie_title}* — *{quality}*\n"
+        f"📁 `{file_name}`\n"
+        f"📦 Size: *{file_size_str}*\n\n"
+        "⚡ Delivered instantly via MOVIE DOT."
+    )
+
+    chat_id = query.message.chat_id
+    is_mkv = file_name.lower().endswith(".mkv")
+
+    try:
+        if file_record.get("is_video") and not is_mkv:
+            await context.bot.send_video(
+                chat_id=chat_id,
+                video=file_id,
+                caption=caption,
+                supports_streaming=True,
                 parse_mode="Markdown"
             )
         else:
-            await update.message.reply_photo(
-                photo=bytes(raw_bytes),
-                caption="✅ *Custom Thumbnail Saved to Your Profile!*\nWhenever you send an MP4 video, you can apply this thumbnail instantly.",
-                parse_mode="Markdown"
-            )
-        return
-
-    # 4. Standard thumbnail watermarking
-    status_msg = await update.message.reply_text("⚡ *Applying watermark to your thumbnail...*", parse_mode="Markdown")
-
-    try:
-        photo = update.message.photo[-1]
-        file_obj = await photo.get_file()
-        file_bytes = await file_obj.download_as_bytearray()
-
-        output_bytes, out_fmt, dims = watermark_engine.apply_watermark(bytes(file_bytes))
-        db.increment_processed(user.id)
-
-        settings = db.get_all_settings()
-        output_mode = settings.get("output_mode", DEFAULT_SETTINGS["output_mode"])
-
-        filename = f"watermarked_thumbnail_{dims[0]}x{dims[1]}.{out_fmt.lower()}"
-        caption = (
-            "✅ *Watermark Applied Successfully!*\n"
-            f"📐 *Resolution:* `{dims[0]} x {dims[1]}` px\n"
-            "⚡ Original quality preserved."
-        )
-
-        if output_mode in ["photo", "both"]:
-            await update.message.reply_photo(
-                photo=output_bytes,
-                caption=caption if output_mode == "photo" else None,
-                parse_mode="Markdown"
-            )
-
-        if output_mode in ["document", "both"]:
-            doc_file = InputFile(io.BytesIO(output_bytes), filename=filename)
-            await update.message.reply_document(
-                document=doc_file,
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=file_id,
                 caption=caption,
                 parse_mode="Markdown"
             )
-
-        await status_msg.delete()
-
+        db.increment_delivered(user.id)
     except Exception as e:
-        logger.error(f"Error processing photo: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ *Error watermarking image:*\n`{str(e)}`", parse_mode="Markdown")
+        logger.warning(f"Error sending as video/doc, attempting document fallback: {e}")
+        try:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=file_id,
+                caption=caption,
+                parse_mode="Markdown"
+            )
+            db.increment_delivered(user.id)
+        except Exception as e2:
+            logger.error(f"Failed to send movie file {file_id}: {e2}", exc_info=True)
+            await query.message.reply_text(
+                "⚠️ *Error Sending File*\n"
+                "Telegram could not deliver this file. It may have been deleted on the server.",
+                parse_mode="Markdown"
+            )
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes uncompressed image files and video documents."""
+
+async def send_all_movie_files(query, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
+    """Sends all available file qualities for a movie to the user."""
+    user = query.from_user
+
+    # Re-verify channel subscription
+    if not admin.is_admin(user.id):
+        force_chan = db.get_force_sub_channel()
+        if force_chan:
+            is_member, _, channel_url = await movie_engine.check_channel_membership(
+                bot=context.bot,
+                user_id=user.id,
+                channel=force_chan
+            )
+            if not is_member:
+                await query.answer("⚠️ Subscription required!", show_alert=True)
+                force_text, force_markup = movie_engine.format_force_sub_message(channel_url, movie_id)
+                await query.message.reply_text(force_text, reply_markup=force_markup, parse_mode="Markdown")
+                return
+
+    movie = db.get_movie(movie_id)
+    movie_title = movie["title"] if movie else "Movie"
+    files = db.get_movie_files(movie_id)
+
+    if not files:
+        await query.answer("No files found.", show_alert=True)
+        return
+
+    await query.answer(f"Sending all {len(files)} qualities...")
+    status_msg = await query.message.reply_text(
+        f"⏳ *Sending all {len(files)} versions of {movie_title}...*",
+        parse_mode="Markdown"
+    )
+
+    sent = 0
+    for f in files:
+        try:
+            caption = (
+                f"🎬 *{movie_title}* — *{f['quality']}*\n"
+                f"📁 `{f.get('file_name', 'movie')}`\n"
+                f"📦 Size: *{movie_engine.format_size(f.get('file_size', 0))}*"
+            )
+            is_mkv = f.get("file_name", "").lower().endswith(".mkv")
+            if f.get("is_video") and not is_mkv:
+                await context.bot.send_video(
+                    chat_id=query.message.chat_id,
+                    video=f["file_id"],
+                    caption=caption,
+                    supports_streaming=True,
+                    parse_mode="Markdown"
+                )
+            else:
+                await context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=f["file_id"],
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
+            sent += 1
+            db.increment_delivered(user.id)
+        except Exception as e:
+            logger.error(f"Failed sending quality {f['quality']}: {e}")
+
+    await status_msg.edit_text(
+        f"✅ *All Files Delivered!* Sent `{sent}` of `{len(files)}` versions of *{movie_title}*.",
+        parse_mode="Markdown"
+    )
+
+
+# ==================== AUTOMATIC CHANNEL & MEDIA INDEXING ====================
+
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Listens to posts in Telegram channels where the bot is an administrator.
+    Automatically indexes video files (MKV, MP4), detects quality, associates with movie_id,
+    and attaches the inline button '📥 GET ALL FILES' pointing to the bot deep link.
+    """
+    msg = update.channel_post
+    if not msg:
+        return
+
+    bot_username = BOT_USERNAME
+    if not bot_username:
+        try:
+            bot_user = await context.bot.get_me()
+            bot_username = bot_user.username or ""
+        except Exception as e:
+            logger.warning(f"Could not retrieve bot username: {e}")
+            bot_username = "bot"
+
+    video = msg.video
+    doc = msg.document
+    caption = msg.caption or ""
+
+    if video:
+        file_id = video.file_id
+        file_unique_id = video.file_unique_id
+        file_name = video.file_name or "video.mp4"
+        file_size = video.file_size or 0
+        mime_type = video.mime_type or "video/mp4"
+        width = video.width or 0
+        height = video.height or 0
+        is_video = True
+    elif doc:
+        mime = (doc.mime_type or "").lower()
+        ext = Path(doc.file_name or "").suffix.lower()
+        if not (mime.startswith("video/") or ext in [".mkv", ".mp4", ".mov", ".avi", ".webm"]):
+            return
+        file_id = doc.file_id
+        file_unique_id = doc.file_unique_id
+        file_name = doc.file_name or "movie.mkv"
+        file_size = doc.file_size or 0
+        mime_type = doc.mime_type or "video/x-matroska"
+        width = doc.thumbnail.width if doc.thumbnail else 0
+        height = doc.thumbnail.height if doc.thumbnail else 0
+        is_video = False
+    elif msg.photo:
+        if caption:
+            info = movie_engine.parse_movie_info(filename="", caption=caption)
+            if info and info.get("year"):
+                photo_file_id = msg.photo[-1].file_id
+                db.add_or_update_movie(
+                    movie_id=info["movie_id"],
+                    title=info["clean_title"],
+                    year=info["year"],
+                    poster_file_id=photo_file_id,
+                    channel_id=msg.chat.id,
+                    channel_message_id=msg.message_id
+                )
+                deep_link = movie_engine.generate_deep_link(info["movie_id"], bot_username)
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("📥 GET ALL FILES", url=deep_link)]])
+                try:
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=msg.chat.id,
+                        message_id=msg.message_id,
+                        reply_markup=kb
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not edit photo channel post markup: {e}")
+        return
+    else:
+        return
+
+    quality = movie_engine.detect_quality(filename=file_name, caption=caption, width=width, height=height)
+    info = movie_engine.parse_movie_info(filename=file_name, caption=caption)
+    movie_id = info["movie_id"]
+    clean_title = info["clean_title"]
+    year = info.get("year")
+
+    db.add_or_update_movie(
+        movie_id=movie_id,
+        title=clean_title,
+        year=year,
+        channel_id=msg.chat.id,
+        channel_message_id=msg.message_id
+    )
+
+    res = db.add_movie_file(
+        movie_id=movie_id,
+        file_id=file_id,
+        file_unique_id=file_unique_id,
+        file_name=file_name,
+        file_size=file_size,
+        quality=quality,
+        mime_type=mime_type,
+        is_video=is_video
+    )
+
+    logger.info(f"Indexed movie from channel: '{clean_title}' | Quality: {quality} | Action: {res['action']}")
+
+    deep_link = movie_engine.generate_deep_link(movie_id, bot_username)
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 GET ALL FILES", url=deep_link)]
+    ])
+
+    try:
+        await context.bot.edit_message_reply_markup(
+            chat_id=msg.chat.id,
+            message_id=msg.message_id,
+            reply_markup=reply_markup
+        )
+        logger.info(f"Attached '📥 GET ALL FILES' button to channel post {msg.message_id}")
+    except Exception as e:
+        logger.debug(f"Could not edit channel message reply markup: {e}")
+
+
+async def handle_video_or_doc_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles video and document uploads sent directly to the bot in private chat.
+    If sent by an Admin, automatically indexes the movie file into the database.
+    """
     user = update.effective_user
     db.register_or_update_user(user.id, user.username, user.first_name)
-    user_state = db.get_user_state(user.id)
+    msg = update.message
 
-    doc = update.message.document
-    mime = (doc.mime_type or "").lower()
-    ext = Path(doc.file_name or "").suffix.lower()
-
-    # Route video sent as document to handle_video
-    if mime.startswith("video/") or ext in [".mp4", ".mkv", ".mov", ".webm"]:
-        await handle_video(update, context)
-        return
-
-    # Validate image document
-    is_image = ext in SUPPORTED_EXTENSIONS or mime.startswith("image/")
-    if not is_image:
-        await update.message.reply_text(
-            "⚠️ *Unsupported File Type*\n"
-            f"Please send an image (`{', '.join(sorted(SUPPORTED_EXTENSIONS))}`) or an MP4 video.",
+    # Regular users sending files
+    if not admin.is_admin(user.id):
+        await msg.reply_text(
+            "👋 *Welcome to MOVIE DOT!*\n\n"
+            "To access movies, please tap the **📥 GET ALL FILES** button on any movie post in our channel.",
+            reply_markup=get_home_markup(user.id),
             parse_mode="Markdown"
         )
         return
 
-    # Check file size
-    if doc.file_size and doc.file_size > (MAX_FILE_SIZE_MB * 1024 * 1024):
-        await update.message.reply_text(
-            f"⚠️ *File too large!* Maximum allowed size is {MAX_FILE_SIZE_MB}MB.",
-            parse_mode="Markdown"
-        )
+    # Admin uploaded a file: index it into movie database
+    video = msg.video
+    doc = msg.document
+    caption = msg.caption or ""
+
+    if video:
+        file_id = video.file_id
+        file_unique_id = video.file_unique_id
+        file_name = video.file_name or "video.mp4"
+        file_size = video.file_size or 0
+        mime_type = video.mime_type or "video/mp4"
+        is_video = True
+    elif doc:
+        mime = (doc.mime_type or "").lower()
+        ext = Path(doc.file_name or "").suffix.lower()
+        if not (mime.startswith("video/") or ext in [".mkv", ".mp4", ".mov", ".avi", ".webm"]):
+            await msg.reply_text("⚠️ Please send an **MKV** or **MP4** video file.", parse_mode="Markdown")
+            return
+        file_id = doc.file_id
+        file_unique_id = doc.file_unique_id
+        file_name = doc.file_name or "movie.mkv"
+        file_size = doc.file_size or 0
+        mime_type = doc.mime_type or "video/x-matroska"
+        is_video = False
+    else:
         return
 
-    # 1. Admin uploading new watermark
-    if admin.is_admin(user.id) and user_state == "waiting_for_watermark":
-        await save_watermark_from_message(update, context, is_document=True)
-        return
+    info = movie_engine.parse_movie_info(filename=file_name, caption=caption)
+    movie_id = info["movie_id"]
+    clean_title = info["clean_title"]
+    year = info.get("year")
+    quality = info["quality"]
 
-    # 2. User uploading image specifically for a pending video
-    if user_state == "waiting_for_video_thumbnail":
-        file_obj = await doc.get_file()
-        raw_bytes = await file_obj.download_as_bytearray()
-        await process_and_send_video(context, update.effective_chat.id, user.id, bytes(raw_bytes))
-        return
+    db.add_or_update_movie(movie_id=movie_id, title=clean_title, year=year)
+    res = db.add_movie_file(
+        movie_id=movie_id,
+        file_id=file_id,
+        file_unique_id=file_unique_id,
+        file_name=file_name,
+        file_size=file_size,
+        quality=quality,
+        mime_type=mime_type,
+        is_video=is_video
+    )
 
-    # 3. User uploading custom thumbnail via /thumbnail
-    if user_state == "waiting_for_user_thumbnail":
-        file_obj = await doc.get_file()
-        raw_bytes = await file_obj.download_as_bytearray()
-        db.set_user_thumbnail(user.id, bytes(raw_bytes))
-        db.set_user_state(user.id, None)
+    bot_user = await context.bot.get_me()
+    bot_username = bot_user.username or BOT_USERNAME or "bot"
+    deep_link = movie_engine.generate_deep_link(movie_id, bot_username)
 
-        pending = db.get_pending_video(user.id)
-        if pending:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎬 Apply to My Pending Video", callback_data="vid_apply_stored")],
-                [InlineKeyboardButton("✅ Just Keep as Saved Thumbnail", callback_data="user_cancel")]
-            ])
-            await update.message.reply_photo(
-                photo=bytes(raw_bytes),
-                caption="✅ *Custom Thumbnail Saved!*\nWould you like to attach this to your uploaded video now?",
-                reply_markup=kb,
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text(
-                "✅ *Custom Thumbnail Saved to Your Profile!*\nWhenever you send an MP4 video, you can apply this thumbnail instantly.",
-                parse_mode="Markdown"
-            )
-        return
+    all_files = db.get_movie_files(movie_id)
+    qualities_text = "\n".join([f" • *{f['quality']}* ({movie_engine.format_size(f.get('file_size', 0))})" for f in all_files])
+    force_chan = db.get_force_sub_channel()
 
-    # 4. Standard uncompressed thumbnail watermarking
-    status_msg = await update.message.reply_text("⚡ *Processing uncompressed thumbnail...*", parse_mode="Markdown")
+    text = (
+        f"🎬 *Movie File Indexed Successfully!*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 *Movie:* *{clean_title}*\n"
+        f"🏷️ *Quality Detected:* *{quality}*\n"
+        f"📁 *Filename:* `{file_name}`\n"
+        f"📦 *File Size:* `{movie_engine.format_size(file_size)}`\n"
+        f"⚙️ *Action:* `{res['action']}`\n\n"
+        f"🔗 *Deep Link:*\n`{deep_link}`\n\n"
+        f"📥 *All Linked Qualities ({len(all_files)}):*\n"
+        f"{qualities_text}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    )
 
-    try:
-        file_obj = await doc.get_file()
-        file_bytes = await file_obj.download_as_bytearray()
+    buttons = [
+        [InlineKeyboardButton("📥 Test GET ALL FILES", callback_data=f"preview_movie:{movie_id}")]
+    ]
+    if force_chan:
+        buttons.append([InlineKeyboardButton("📢 Post to Channel", callback_data=f"adm_post_chan:{movie_id}")])
+    buttons.append([InlineKeyboardButton("🎬 Manage All Movies", callback_data="adm_movies")])
 
-        output_bytes, out_fmt, dims = watermark_engine.apply_watermark(bytes(file_bytes))
-        db.increment_processed(user.id)
+    await msg.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown"
+    )
 
-        settings = db.get_all_settings()
-        output_mode = settings.get("output_mode", DEFAULT_SETTINGS["output_mode"])
 
-        orig_stem = Path(doc.file_name or "thumbnail").stem
-        out_filename = f"{orig_stem}_watermarked.{out_fmt.lower()}"
-
-        caption = (
-            "✅ *Watermark Applied (Uncompressed HD)!*\n"
-            f"📐 *Resolution:* `{dims[0]} x {dims[1]}` px\n"
-            "💎 100% original quality preserved without compression."
-        )
-
-        if output_mode == "both":
-            await update.message.reply_photo(photo=output_bytes)
-
-        doc_file = InputFile(io.BytesIO(output_bytes), filename=out_filename)
-        await update.message.reply_document(
-            document=doc_file,
-            caption=caption,
-            parse_mode="Markdown"
-        )
-
-        await status_msg.delete()
-
-    except Exception as e:
-        logger.error(f"Error processing document: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ *Error watermarking document:*\n`{str(e)}`", parse_mode="Markdown")
-
-async def save_watermark_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_document: bool):
-    """Saves user-uploaded image as the new exact watermark (Admin only)."""
-    user = update.effective_user
-    status_msg = await update.message.reply_text("⏳ *Saving your exact watermark image...*", parse_mode="Markdown")
-
-    try:
-        if is_document:
-            file_obj = await update.message.document.get_file()
-        else:
-            file_obj = await update.message.photo[-1].get_file()
-
-        raw_bytes = await file_obj.download_as_bytearray()
-        result = watermark_engine.save_new_watermark(bytes(raw_bytes))
-
-        db.set_user_state(user.id, None)
-
-        if result.get("success"):
-            w = result.get("width")
-            h = result.get("height")
-            text = (
-                "🎉 *New Default Watermark Successfully Saved!*\n\n"
-                f"• Dimensions: `{w} x {h}` px\n"
-                "• Exact custom watermark preserved.\n"
-                "• All subsequent thumbnails and videos will automatically use this watermark!"
-            )
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("👁️ Preview Placement", callback_data="adm_preview")],
-                [InlineKeyboardButton("🛠️ Back to Admin Panel", callback_data="adm_main")]
-            ])
-            await status_msg.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        else:
-            await status_msg.edit_text(f"❌ Failed to save watermark: {result.get('error')}")
-
-    except Exception as e:
-        logger.error(f"Error saving watermark: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Failed to process watermark: {e}")
+# ==================== TEXT & CALLBACK ROUTING ====================
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles text messages and admin broadcast inputs."""
+    """Handles text messages and admin state inputs."""
     user = update.effective_user
     text = update.message.text.strip()
     user_state = db.get_user_state(user.id)
 
-    # Admin broadcast state
+    # 1. Admin configuring force-sub channel
+    if admin.is_admin(user.id) and user_state == "waiting_for_force_channel":
+        db.set_user_state(user.id, None)
+        if text.lower() in ["off", "disable", "none", "remove"]:
+            db.set_force_sub_channel("")
+            await update.message.reply_text("✅ Force Join has been **disabled**.", parse_mode="Markdown")
+            return
+
+        db.set_force_sub_channel(text)
+        await update.message.reply_text(
+            f"✅ *Force-Join Channel Saved!*\n\n"
+            f"• Target Channel: `{text}`\n"
+            f"• All users must subscribe to this channel before downloading movie files.",
+            parse_mode="Markdown"
+        )
+        return
+
+    # 2. Admin broadcasting
     if admin.is_admin(user.id) and user_state == "waiting_for_broadcast":
         db.set_user_state(user.id, None)
         status_msg = await update.message.reply_text("📢 *Broadcasting announcement to all users...*", parse_mode="Markdown")
@@ -706,153 +677,156 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await status_msg.edit_text(
             f"✅ *Broadcast Finished!*\n\n"
-            f"• Successfully sent: `{success}`\n"
+            f"• Sent: `{success}`\n"
             f"• Failed/Blocked: `{failed}`\n"
-            f"• Total registered: `{len(user_ids)}`",
+            f"• Total users: `{len(user_ids)}`",
             parse_mode="Markdown"
         )
         return
 
     # Regular conversational guidance
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Upload Thumbnail", callback_data="user_cmd_thumbnail")],
-        [InlineKeyboardButton("ℹ️ Help Manual", callback_data="user_help")]
-    ])
     await update.message.reply_text(
-        "👋 Please send an **image** or an **MP4 video** to apply or replace thumbnails!\n\n"
-        "You can send photos, files, or videos up to 20MB.",
-        reply_markup=keyboard,
+        "🎬 *Welcome to MOVIE DOT!*\n\n"
+        "To get movie files, browse our Telegram channel and click **📥 GET ALL FILES** on any movie post.",
+        reply_markup=get_home_markup(user.id),
         parse_mode="Markdown"
     )
 
+
 async def handle_callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Routes callback queries between admin actions, video actions, and general user actions."""
+    """Routes callback queries between admin actions and movie delivery."""
     query = update.callback_query
     data = query.data
-    user_id = update.effective_user.id
+    user = update.effective_user
 
-    # Route admin callbacks
-    if data.startswith("adm_") or data.startswith("set_"):
+    # Route admin panel callbacks
+    if data.startswith("adm_"):
         await admin.handle_admin_callback(update, context)
+        return
+
+    # Force Join Verification Callback
+    if data.startswith("verify_sub:"):
+        movie_id = data.split(":", 1)[1]
+        force_chan = db.get_force_sub_channel()
+
+        # Check membership with Bot API
+        is_member, status_reason, channel_url = await movie_engine.check_channel_membership(
+            bot=context.bot,
+            user_id=user.id,
+            channel=force_chan
+        )
+
+        if not is_member:
+            await query.answer(
+                "❌ Verification failed! You haven't joined our channel yet. Please join and click Verify again.",
+                show_alert=True
+            )
+            return
+
+        # Verification succeeded! Show confirmation toast
+        await query.answer("✅ Verification successful! Loading available qualities...")
+
+        # Continue the requested movie immediately!
+        movie = db.get_movie(movie_id)
+        if not movie:
+            await query.message.reply_text("⚠️ Movie not found.")
+            return
+
+        files = db.get_movie_files(movie_id)
+        if not files:
+            await query.message.reply_text("⚠️ No files attached to this movie.")
+            return
+
+        # Render quality selection screen
+        await show_movie_qualities_screen(query.message, movie, files, is_edit=True)
         return
 
     await query.answer()
 
-    # Video Action: Apply stored thumbnail
-    if data == "vid_apply_stored":
-        stored_thumb = db.get_user_thumbnail(user_id)
-        if not stored_thumb:
-            await query.message.reply_text("⚠️ No saved thumbnail found. Please use /thumbnail to set one.")
-            return
-        await process_and_send_video(context, query.message.chat_id, user_id, stored_thumb, original_message=query.message)
+    # Deliver specific movie quality
+    if data.startswith("getfile:"):
+        parts = data.split(":", 2)
+        if len(parts) == 3:
+            _, movie_id, quality = parts
+            await send_movie_file(query, context, movie_id, quality)
 
-    # Video Action: Watermark current extracted thumbnail
-    elif data == "vid_watermark_current":
-        pending = db.get_pending_video(user_id)
-        if not pending or not pending.get("extracted_thumb"):
-            await query.message.reply_text("⚠️ Could not locate video thumbnail. Please upload an image.")
-            return
-        await process_and_send_video(context, query.message.chat_id, user_id, pending["extracted_thumb"], original_message=query.message)
+    # Deliver all qualities
+    elif data.startswith("getall:"):
+        movie_id = data.split(":", 1)[1]
+        await send_all_movie_files(query, context, movie_id)
 
-    # Video Action: Upload new custom thumbnail for this video
-    elif data == "vid_upload_new":
-        db.set_user_state(user_id, "waiting_for_video_thumbnail")
-        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="user_cancel")]])
-        await query.message.reply_text(
-            "📸 *Send New Thumbnail Image*\n\n"
-            "Please send the image you want to attach as this video's new thumbnail.\n"
-            "Your brand watermark will be automatically applied to it!",
-            reply_markup=cancel_kb,
-            parse_mode="Markdown"
+    # Preview quality screen (Admin test)
+    elif data.startswith("preview_movie:"):
+        movie_id = data.split(":", 1)[1]
+        movie = db.get_movie(movie_id)
+        if movie:
+            files = db.get_movie_files(movie_id)
+            if files:
+                await show_movie_qualities_screen(query.message, movie, files, is_edit=False)
+            else:
+                await query.message.reply_text("⚠️ No files attached yet.")
+
+    # Home Menu
+    elif data == "user_home":
+        welcome_text = (
+            "🎬 *Welcome to MOVIE DOT!*\n\n"
+            "Your Movie File Management Bot."
         )
+        await query.message.reply_text(welcome_text, reply_markup=get_home_markup(user.id), parse_mode="Markdown")
 
-    # User Command: Thumbnail flow
-    elif data == "user_cmd_thumbnail":
-        db.set_user_state(user_id, "waiting_for_user_thumbnail")
-        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="user_cancel")]])
-        await query.message.reply_text(
-            "📸 *Set Custom Thumbnail*\n\n"
-            "Please send your **thumbnail image** now (Photo or Document).\n"
-            "Once saved, it can be attached to any video or watermarked directly!",
-            reply_markup=cancel_kb,
-            parse_mode="Markdown"
+    # User clicked GET ALL FILES from home menu
+    elif data == "user_get_all_files":
+        force_chan = db.get_force_sub_channel()
+        chan_url = f"https://t.me/{force_chan.lstrip('@')}" if force_chan and not force_chan.startswith("-100") else "https://t.me/"
+        text = (
+            "📥 *HOW TO GET MOVIE FILES*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Every movie post in our Telegram channel has an **📥 GET ALL FILES** button.\n\n"
+            "1. Visit our channel.\n"
+            "2. Find any movie you want.\n"
+            "3. Click **📥 GET ALL FILES** on the post.\n"
+            "4. MOVIE DOT will open and show all available qualities (**480p**, **720p**, **1080p**, **4K**)!\n"
+            "━━━━━━━━━━━━━━━━━━━━━━"
         )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 Open Movie Channel", url=chan_url)],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="user_home")]
+        ])
+        await query.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
 
-    elif data == "user_set_new_thumb":
-        db.set_user_state(user_id, "waiting_for_user_thumbnail")
-        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="user_cancel")]])
-        await query.message.reply_text(
-            "📸 Please send the new image to replace your stored thumbnail.",
-            reply_markup=cancel_kb,
-            parse_mode="Markdown"
-        )
-
-    elif data == "user_del_thumb":
-        db.clear_user_thumbnail(user_id)
-        await query.message.reply_text("✅ Saved thumbnail removed from your profile.")
-
-    elif data == "user_cmd_video_info":
-        await query.message.reply_text(
-            "🎬 *Video Thumbnail Changer*\n\n"
-            "Simply send any **MP4 video** (up to 20MB) to the bot.\n"
-            "The bot will extract the current thumbnail and let you:\n"
-            "1. Watermark the existing thumbnail\n"
-            "2. Replace it with your own custom thumbnail\n"
-            "All done with **zero video re-encoding**!",
-            parse_mode="Markdown"
-        )
-
+    # Help from home menu
     elif data == "user_help":
         help_text = (
-            "📖 *QUICK HELP GUIDE*\n\n"
-            "1. **Watermark an Image:** Send any photo or document.\n"
-            "2. **Change Video Thumbnail:** Send an MP4 video (under 20MB).\n"
-            "3. **Store a Thumbnail:** Use `/thumbnail` to save a custom thumbnail for later.\n"
-            "4. Tap `/` to see all commands in Telegram's menu!"
+            "📖 *MOVIE DOT — USER GUIDE*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🎬 *How to Download Movie Files:*\n"
+            " 1. Browse movie posts in our Telegram channel.\n"
+            " 2. Tap the **📥 GET ALL FILES** button on any movie post.\n"
+            " 3. If prompted, join our channel and click **✅ I'VE JOINED – VERIFY**.\n"
+            " 4. Select your preferred resolution (**480p**, **720p**, **1080p**, or **4K**).\n"
+            " 5. The movie file is delivered instantly directly to your chat!\n"
+            "━━━━━━━━━━━━━━━━━━━━━━"
         )
-        await query.message.reply_text(help_text, parse_mode="Markdown")
-
-    elif data == "user_preview":
-        try:
-            preview_bytes = watermark_engine.generate_preview_thumbnail()
-            await query.message.reply_photo(
-                photo=preview_bytes,
-                caption="👁️ *Current Watermark Placement Preview on 1280x720 Canvas*",
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            await query.message.reply_text(f"❌ Preview unavailable: {e}")
-
-    elif data == "user_cancel":
-        db.set_user_state(user_id, None)
-        db.clear_pending_video(user_id)
-        await query.message.reply_text("✅ Action cancelled.")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 GET ALL FILES", callback_data="user_get_all_files")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="user_home")]
+        ])
+        await query.message.reply_text(help_text, reply_markup=kb, parse_mode="Markdown")
 
 
 # ==================== GLOBAL ERROR HANDLER ====================
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Global error handler for all unhandled exceptions."""
+    """Global error handler for unhandled exceptions."""
     logger.error("Exception while handling update:", exc_info=context.error)
-    if isinstance(update, Update) and update.effective_message:
-        try:
-            await update.effective_message.reply_text(
-                "⚠️ *An error occurred while processing your request.*\n"
-                "Please try again or contact the administrator.",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
 
 
 # ==================== APPLICATION BUILDER ====================
 
 def build_application() -> Application:
-    """Builds and configures the telegram bot application."""
-    if not BOT_TOKEN or BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("\n" + "=" * 60)
+    """Builds and configures the pure MOVIE DOT application."""
+    if not BOT_TOKEN:
         print("⚠️ ERROR: BOT_TOKEN is not set in your .env file!")
-        print("=" * 60 + "\n")
 
     app = (
         Application.builder()
@@ -861,24 +835,23 @@ def build_application() -> Application:
         .build()
     )
 
-    # Commands registered in menu
+    # Core commands
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("thumbnail", thumbnail_command))
-    app.add_handler(CommandHandler("watermark", admin.handle_watermark_command))
-    app.add_handler(CommandHandler("settings", admin.handle_settings_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
 
-    # Additional command aliases
+    # Admin commands
+    app.add_handler(CommandHandler("movies", admin.handle_movies_command))
+    app.add_handler(CommandHandler("setchannel", admin.handle_set_channel_command))
     app.add_handler(CommandHandler("admin", admin.handle_admin_command))
-    app.add_handler(CommandHandler("preview", preview_command))
 
-    # Media handlers
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    # Channel Post Handler (indexes channel uploads and attaches GET ALL FILES button)
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_post))
 
-    # Text messages
+    # Media handlers (for admin uploading/indexing movie files in PM)
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, handle_video_or_doc_message))
+
+    # Text messages (broadcasts, channel setting, conversational guidance)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Callback Query Router
@@ -889,15 +862,17 @@ def build_application() -> Application:
 
     return app
 
-def main():
-    """Runs the bot in polling mode with automatic reconnects."""
-    if not BOT_TOKEN or BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("Cannot start bot without BOT_TOKEN in .env. Exiting.")
-        sys.exit(1)
 
-    print("🚀 Starting Telegram Thumbnail & Watermark Bot...")
+def main():
+    """Runs the Movie Dot bot in polling mode with automatic reconnects."""
+    if not BOT_TOKEN:
+        print("Cannot start bot without BOT_TOKEN in .env. Exiting.")
+        return
+
+    print("🚀 Starting MOVIE DOT Bot...")
     app = build_application()
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()

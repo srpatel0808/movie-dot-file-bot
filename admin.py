@@ -1,351 +1,362 @@
 """
-Admin Panel and Callback Query Handlers.
-Provides an interactive inline keyboard interface for managing watermark settings,
-updating the watermark image, broadcasting announcements, and viewing statistics.
+Admin Panel and Management Handlers for MOVIE DOT Bot.
+Provides an interactive inline keyboard interface for managing movie files,
+configuring the mandatory force-join subscription channel, broadcasting announcements,
+and viewing real-time database statistics.
 """
 
+import logging
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup
 )
 from telegram.ext import ContextTypes
-from config import ADMIN_IDS, DEFAULT_SETTINGS
+from config import ADMIN_IDS, BOT_USERNAME
 from database import db
-from watermark_engine import watermark_engine
+import movie_engine
 
-# Helper to check if a user is an authorized admin
+logger = logging.getLogger("AdminPanel")
+
+
 def is_admin(user_id: int) -> bool:
-    # If ADMIN_IDS is defined, check membership
+    """Helper to check if a user is an authorized administrator."""
     if ADMIN_IDS:
         return user_id in ADMIN_IDS
-    # If no ADMIN_IDS set yet, allow user to know they need to set it
     return False
 
+
 def get_admin_dashboard_text() -> str:
-    settings = db.get_all_settings()
+    """Renders the clean MOVIE DOT admin dashboard text."""
     stats = db.get_stats()
-    wm_info = watermark_engine.get_watermark_info()
-
-    pos_display = settings.get("position", DEFAULT_SETTINGS["position"]).replace("_", " ").title()
-    scale = settings.get("scale", DEFAULT_SETTINGS["scale"])
-    opacity = settings.get("opacity", DEFAULT_SETTINGS["opacity"])
-    padding = settings.get("padding", DEFAULT_SETTINGS["padding"])
-    out_mode = settings.get("output_mode", DEFAULT_SETTINGS["output_mode"]).capitalize()
-
-    wm_status = f"{wm_info.get('width', 0)}x{wm_info.get('height', 0)} px ({wm_info.get('format', 'PNG')})" if wm_info.get("exists") else "❌ Missing"
+    force_chan = stats.get("force_sub_channel") or "⚠️ None (No verification active)"
 
     text = (
-        "🛠 *ADMIN CONTROL PANEL*\n"
+        "🛠 *MOVIE DOT — ADMIN CONTROL PANEL*\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *Bot Statistics:*\n"
-        f" • Total Users: `{stats['total_users']}`\n"
-        f" • Thumbnails Watermarked: `{stats['total_processed']}`\n\n"
-        f"🖼 *Active Watermark:*\n"
-        f" • Source: `{'Custom Upload' if wm_info.get('is_custom') else 'Default Sample'}`\n"
-        f" • Resolution: `{wm_status}`\n\n"
-        f"⚙️ *Current Placement Settings:*\n"
-        f" • 📍 Position: *{pos_display}*\n"
-        f" • 📐 Size: *{scale}%* of thumbnail width\n"
-        f" • 💧 Opacity: *{opacity}%*\n"
-        f" • 📏 Edge Margin: *{padding}px*\n"
-        f" • 📤 Output Mode: *{out_mode}*\n"
+        f"📊 *Bot Performance:*\n"
+        f" • Registered Users: `{stats['total_users']}`\n"
+        f" • Movie Files Delivered: `{stats['total_delivered']}`\n\n"
+        f"🎬 *Movie Library:*\n"
+        f" • Indexed Movies: `{stats['total_movies']}`\n"
+        f" • Total Qualities Stored: `{stats['total_files']}`\n"
+        f" • Total Storage Indexed: `{movie_engine.format_size(stats['total_size_bytes'])}`\n\n"
+        f"📢 *Force-Join Subscription Channel:*\n"
+        f" • Target: `{force_chan}`\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Select an option below to adjust settings or upload a new watermark:"
+        "Select an option below to manage movies or configure settings:"
     )
     return text
 
+
 def get_admin_keyboard() -> InlineKeyboardMarkup:
+    """Returns the streamlined Movie Dot admin keyboard."""
     keyboard = [
         [
-            InlineKeyboardButton("🖼️ Change Watermark", callback_data="adm_change_wm"),
-            InlineKeyboardButton("👁️ Preview Current", callback_data="adm_preview")
+            InlineKeyboardButton("🎬 Manage Movies & Files", callback_data="adm_movies")
         ],
         [
-            InlineKeyboardButton("📍 Position", callback_data="adm_menu_pos"),
-            InlineKeyboardButton("📐 Size", callback_data="adm_menu_size"),
-            InlineKeyboardButton("💧 Opacity", callback_data="adm_menu_opacity")
+            InlineKeyboardButton("📢 Set Force-Sub Channel", callback_data="adm_set_channel"),
+            InlineKeyboardButton("📊 System Statistics", callback_data="adm_stats")
         ],
         [
-            InlineKeyboardButton("📏 Edge Margin", callback_data="adm_menu_pad"),
-            InlineKeyboardButton("📤 Output Mode", callback_data="adm_menu_output")
-        ],
-        [
-            InlineKeyboardButton("📊 Detailed Stats", callback_data="adm_stats"),
-            InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast")
-        ],
-        [
-            InlineKeyboardButton("🔄 Reset to Default", callback_data="adm_confirm_reset"),
+            InlineKeyboardButton("📢 Broadcast to Users", callback_data="adm_broadcast"),
             InlineKeyboardButton("❌ Close Panel", callback_data="adm_close")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_position_keyboard() -> InlineKeyboardMarkup:
-    current = db.get_setting("position", DEFAULT_SETTINGS["position"])
-    
-    def btn(label, code):
-        mark = " ✅" if current == code else ""
-        return InlineKeyboardButton(f"{label}{mark}", callback_data=f"set_pos_{code}")
-
-    keyboard = [
-        [btn("↖️ Top-Left", "top_left"), btn("⬆️ Top-Center", "top_center"), btn("↗️ Top-Right", "top_right")],
-        [btn("⬅️ Mid-Left", "center_left"), btn("⏺️ Center", "center"), btn("➡️ Mid-Right", "center_right")],
-        [btn("↙️ Bot-Left", "bottom_left"), btn("⬇️ Bot-Center", "bottom_center"), btn("↘️ Bot-Right", "bottom_right")],
-        [InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_size_keyboard() -> InlineKeyboardMarkup:
-    current = int(db.get_setting("scale", DEFAULT_SETTINGS["scale"]))
-    sizes = [10, 15, 20, 25, 30, 35, 40, 50]
-    buttons = []
-    row = []
-    for s in sizes:
-        mark = " ✅" if current == s else ""
-        row.append(InlineKeyboardButton(f"{s}%{mark}", callback_data=f"set_size_{s}"))
-        if len(row) == 4:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")])
-    return InlineKeyboardMarkup(buttons)
-
-def get_opacity_keyboard() -> InlineKeyboardMarkup:
-    current = int(db.get_setting("opacity", DEFAULT_SETTINGS["opacity"]))
-    opacities = [20, 40, 60, 75, 85, 100]
-    buttons = []
-    row = []
-    for op in opacities:
-        mark = " ✅" if current == op else ""
-        row.append(InlineKeyboardButton(f"{op}%{mark}", callback_data=f"set_opac_{op}"))
-        if len(row) == 3:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")])
-    return InlineKeyboardMarkup(buttons)
-
-def get_padding_keyboard() -> InlineKeyboardMarkup:
-    current = int(db.get_setting("padding", DEFAULT_SETTINGS["padding"]))
-    paddings = [0, 10, 20, 30, 50]
-    buttons = []
-    row = []
-    for p in paddings:
-        mark = " ✅" if current == p else ""
-        lbl = f"{p}px (Flush)" if p == 0 else f"{p}px"
-        row.append(InlineKeyboardButton(f"{lbl}{mark}", callback_data=f"set_pad_{p}"))
-        if len(row) == 3:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")])
-    return InlineKeyboardMarkup(buttons)
-
-def get_output_mode_keyboard() -> InlineKeyboardMarkup:
-    current = db.get_setting("output_mode", DEFAULT_SETTINGS["output_mode"])
-    modes = [
-        ("📷 Photo + 📄 Document (Recommended)", "both"),
-        ("📄 Uncompressed Document Only", "document"),
-        ("📷 Compressed Photo Only", "photo")
-    ]
-    buttons = []
-    for label, code in modes:
-        mark = " ✅" if current == code else ""
-        buttons.append([InlineKeyboardButton(f"{label}{mark}", callback_data=f"set_out_{code}")])
-    buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")])
-    return InlineKeyboardMarkup(buttons)
 
 async def handle_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /admin command."""
     user = update.effective_user
     if not is_admin(user.id):
-        if not ADMIN_IDS:
-            await update.message.reply_text(
-                f"⚠️ *Admin Not Configured Yet*\n\n"
-                f"Your Telegram User ID is: `{user.id}`\n\n"
-                f"To authorize yourself as admin, add your ID to the `.env` file:\n"
-                f"`ADMIN_IDS={user.id}`\n\n"
-                f"Then restart the bot or run `/admin` again.",
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text("⛔ *Access Denied:* You are not authorized to use the admin panel.", parse_mode="Markdown")
+        await update.message.reply_text("⛔ *Access Denied:* This command is restricted to bot administrators.", parse_mode="Markdown")
         return
 
-    # Clear any pending state
-    db.set_user_state(user.id, None)
+    text = get_admin_dashboard_text()
+    keyboard = get_admin_keyboard()
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
+
+async def handle_movies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /movies command."""
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ *Access Denied:* This command is restricted to administrators.", parse_mode="Markdown")
+        return
+
+    movies = db.get_all_movies(limit=30)
+    bot_user = await context.bot.get_me()
+    bot_username = bot_user.username or BOT_USERNAME or "bot"
+
+    if not movies:
+        text = (
+            "🎬 *INDEXED MOVIES & FILES*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "ℹ️ *No movies currently in the database.*\n\n"
+            "• Upload video files (**MKV** or **MP4**) directly to your channel, or\n"
+            "• Send or forward movie files directly to this chat.\n\n"
+            "Movie Dot automatically extracts titles and qualities (480p, 720p, 1080p, 4K)!"
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")]])
+        await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
+        return
+
+    stats = db.get_stats()
+    text = (
+        "🎬 *INDEXED MOVIES & FILES*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Total Movies: `{stats['total_movies']}`\n"
+        f"• Total Qualities: `{stats['total_files']}`\n"
+        f"• Storage Volume: `{movie_engine.format_size(stats['total_size_bytes'])}`\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Tap any movie below to view qualities, deep link, or post to channel:"
+    )
+
+    buttons = []
+    for m in movies:
+        f_count = m.get("file_count", 0)
+        btn_title = f"🎬 {m['title']} ({f_count} ver)"
+        buttons.append([InlineKeyboardButton(btn_title, callback_data=f"adm_minfo:{m['movie_id']}")])
+
+    buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")])
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
+
+async def handle_set_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /setchannel <channel> command."""
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ *Access Denied.*", parse_mode="Markdown")
+        return
+
+    if not context.args:
+        curr = db.get_force_sub_channel() or "None"
+        await update.message.reply_text(
+            f"📢 *Current Force-Join Channel:* `{curr}`\n\n"
+            "Usage: `/setchannel @YourChannel` or `/setchannel -100xxxxxxxxxx`\n"
+            "To disable force-join: `/setchannel off`",
+            parse_mode="Markdown"
+        )
+        return
+
+    new_channel = context.args[0].strip()
+    if new_channel.lower() in ["off", "disable", "none", "remove"]:
+        db.set_force_sub_channel("")
+        await update.message.reply_text("✅ Mandatory channel subscription (Force Join) has been **disabled**.", parse_mode="Markdown")
+        return
+
+    db.set_force_sub_channel(new_channel)
     await update.message.reply_text(
-        get_admin_dashboard_text(),
-        reply_markup=get_admin_keyboard(),
+        f"✅ *Force-Join Channel Updated!*\n\n"
+        f"• New Target: `{new_channel}`\n"
+        f"• Bot will now verify users belong to this channel before delivering movie files.\n\n"
+        f"⚠️ *Important:* Ensure the bot is added as an **Administrator** in `{new_channel}`.",
         parse_mode="Markdown"
     )
 
+
 async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles all admin inline button presses."""
+    """Dispatches all admin panel actions and movie configuration callbacks."""
     query = update.callback_query
-    await query.answer()
+    data = query.data
     user_id = update.effective_user.id
 
     if not is_admin(user_id):
-        await query.edit_message_text("⛔ *Unauthorized action.*", parse_mode="Markdown")
+        await query.answer("Access Denied.", show_alert=True)
         return
 
-    data = query.data
+    await query.answer()
 
+    # 1. Main Dashboard
     if data == "adm_main":
         db.set_user_state(user_id, None)
+        text = get_admin_dashboard_text()
+        keyboard = get_admin_keyboard()
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
+    # 2. Movie List & Management
+    elif data == "adm_movies":
+        movies = db.get_all_movies(limit=30)
+        bot_user = await context.bot.get_me()
+        bot_username = bot_user.username or BOT_USERNAME or "bot"
+
+        if not movies:
+            text = (
+                "🎬 *INDEXED MOVIES & FILES*\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "ℹ️ *No movies currently in the database.*\n\n"
+                "• Upload video files (**MKV** or **MP4**) directly to your channel, or\n"
+                "• Send or forward movie files directly to this chat.\n\n"
+                "Movie Dot automatically extracts titles and qualities (480p, 720p, 1080p, 4K)!"
+            )
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")]])
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+            return
+
+        stats = db.get_stats()
+        text = (
+            "🎬 *INDEXED MOVIES & FILES*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Total Movies: `{stats['total_movies']}`\n"
+            f"• Total Qualities: `{stats['total_files']}`\n"
+            f"• Storage Volume: `{movie_engine.format_size(stats['total_size_bytes'])}`\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Tap any movie below to view qualities, deep link, or post to channel:"
+        )
+
+        buttons = []
+        for m in movies:
+            f_count = m.get("file_count", 0)
+            btn_title = f"🎬 {m['title']} ({f_count} ver)"
+            buttons.append([InlineKeyboardButton(btn_title, callback_data=f"adm_minfo:{m['movie_id']}")])
+
+        buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
+    # 3. Individual Movie Details
+    elif data.startswith("adm_minfo:"):
+        movie_id = data.split(":", 1)[1]
+        movie = db.get_movie(movie_id)
+        if not movie:
+            await query.answer("Movie not found.", show_alert=True)
+            return
+
+        files = db.get_movie_files(movie_id)
+        bot_user = await context.bot.get_me()
+        bot_username = bot_user.username or BOT_USERNAME or "bot"
+        deep_link = movie_engine.generate_deep_link(movie_id, bot_username)
+
+        file_lines = []
+        for f in files:
+            file_lines.append(f" • *{f['quality']}*: `{f['file_name']}` ({movie_engine.format_size(f['file_size'])})")
+
+        files_text = "\n".join(file_lines) if file_lines else "_No files attached._"
+        force_chan = db.get_force_sub_channel()
+
+        text = (
+            f"🎬 *{movie['title']}*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 *Movie ID:* `{movie['movie_id']}`\n"
+            f"📅 *Year:* `{movie.get('year') or 'N/A'}`\n"
+            f"🔗 *Deep Link:*\n`{deep_link}`\n\n"
+            f"📁 *Available Qualities ({len(files)}):*\n"
+            f"{files_text}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━"
+        )
+
+        kb_rows = [
+            [InlineKeyboardButton("📥 Test GET ALL FILES", callback_data=f"preview_movie:{movie_id}")]
+        ]
+        if force_chan:
+            kb_rows.append([InlineKeyboardButton("📢 Post to Channel", callback_data=f"adm_post_chan:{movie_id}")])
+        kb_rows.append([InlineKeyboardButton("🗑️ Delete Movie & Files", callback_data=f"adm_del_confirm:{movie_id}")])
+        kb_rows.append([InlineKeyboardButton("🔙 Back to Movies List", callback_data="adm_movies")])
+
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode="Markdown")
+
+    # 4. Confirm Movie Deletion
+    elif data.startswith("adm_del_confirm:"):
+        movie_id = data.split(":", 1)[1]
+        movie = db.get_movie(movie_id)
+        title = movie["title"] if movie else movie_id
+        text = (
+            f"⚠️ *Confirm Movie Deletion*\n\n"
+            f"Are you sure you want to permanently delete:\n"
+            f"🎬 *{title}*\n\n"
+            "All linked quality files (Telegram file IDs) will be removed from the database."
+        )
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🗑️ Yes, Delete", callback_data=f"adm_del_do:{movie_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"adm_minfo:{movie_id}")
+            ]
+        ])
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+
+    # 5. Execute Movie Deletion
+    elif data.startswith("adm_del_do:"):
+        movie_id = data.split(":", 1)[1]
+        db.delete_movie(movie_id)
+        await query.answer("Movie deleted.")
         await query.edit_message_text(
-            get_admin_dashboard_text(),
-            reply_markup=get_admin_keyboard(),
+            "✅ *Movie and all associated files deleted from database.*",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Movies List", callback_data="adm_movies")]]),
             parse_mode="Markdown"
         )
 
-    elif data == "adm_change_wm":
-        db.set_user_state(user_id, "waiting_for_watermark")
-        cancel_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel & Return", callback_data="adm_main")]
-        ])
+    # 6. Post Movie to Channel
+    elif data.startswith("adm_post_chan:"):
+        movie_id = data.split(":", 1)[1]
+        movie = db.get_movie(movie_id)
+        files = db.get_movie_files(movie_id)
+        chan = db.get_force_sub_channel()
+
+        if not movie or not chan:
+            await query.answer("Channel or movie not configured.", show_alert=True)
+            return
+
+        bot_user = await context.bot.get_me()
+        bot_username = bot_user.username or BOT_USERNAME or "bot"
+
+        post_text, reply_markup = movie_engine.format_movie_channel_post(movie, files, bot_username)
+
+        try:
+            if movie.get("poster_file_id"):
+                await context.bot.send_photo(
+                    chat_id=chan,
+                    photo=movie["poster_file_id"],
+                    caption=post_text,
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=chan,
+                    text=post_text,
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+            await query.answer("✅ Successfully posted to channel!", show_alert=True)
+        except Exception as e:
+            logger.error(f"Failed to post to channel {chan}: {e}", exc_info=True)
+            await query.answer(f"Failed to post to channel: {e}", show_alert=True)
+
+    # 7. Configure Force-Sub Channel Prompt
+    elif data == "adm_set_channel":
+        db.set_user_state(user_id, "waiting_for_force_channel")
+        curr = db.get_force_sub_channel() or "None"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="adm_main")]])
         await query.edit_message_text(
-            "🖼️ *Upload New Watermark*\n\n"
-            "Please send your **exact watermark image** now.\n\n"
-            "📌 *Tips:*\n"
-            " • Send as a **PNG file (Document)** for crisp transparent background.\n"
-            " • Or send as a standard photo.\n"
-            " • The exact design will be preserved without any modifications.",
+            f"📢 *MANDATORY CHANNEL (FORCE JOIN) CONFIGURATION*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Current Target: `{curr}`\n\n"
+            "Please send the channel **username** (e.g. `@MyChannel`) or **ID** (e.g. `-100xxxxxxxxxx`).\n"
+            "Send `off` to disable force join.\n\n"
+            "*(Make sure Movie Dot is an Administrator in this channel so it can verify subscribers!)*",
             reply_markup=cancel_kb,
             parse_mode="Markdown"
         )
 
-    elif data == "adm_preview":
-        await query.message.reply_text("⏳ Generating live preview thumbnail...")
-        try:
-            preview_bytes = watermark_engine.generate_preview_thumbnail()
-            settings = db.get_all_settings()
-            pos = settings.get("position", DEFAULT_SETTINGS["position"]).replace("_", " ").title()
-            scale = settings.get("scale", DEFAULT_SETTINGS["scale"])
-            opacity = settings.get("opacity", DEFAULT_SETTINGS["opacity"])
-            pad = settings.get("padding", DEFAULT_SETTINGS["padding"])
-
-            caption = (
-                "👁️ *Live Watermark Preview (1280x720 Canvas)*\n\n"
-                f" • Position: *{pos}*\n"
-                f" • Size: *{scale}%*\n"
-                f" • Opacity: *{opacity}%*\n"
-                f" • Margin: *{pad}px*"
-            )
-            await query.message.reply_photo(photo=preview_bytes, caption=caption, parse_mode="Markdown")
-        except Exception as e:
-            await query.message.reply_text(f"❌ Error generating preview: {e}")
-
-    elif data == "adm_menu_pos":
-        await query.edit_message_text(
-            "📍 *Select Watermark Position:*\n\n"
-            "Choose one of the 9 anchor positions below:",
-            reply_markup=get_position_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif data.startswith("set_pos_"):
-        new_pos = data.replace("set_pos_", "")
-        db.set_setting("position", new_pos)
-        await query.edit_message_text(
-            f"✅ Position updated to: *{new_pos.replace('_', ' ').title()}*",
-            reply_markup=get_position_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif data == "adm_menu_size":
-        await query.edit_message_text(
-            "📐 *Select Watermark Size:*\n\n"
-            "Watermark width as a percentage of the thumbnail width (aspect ratio is strictly preserved):",
-            reply_markup=get_size_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif data.startswith("set_size_"):
-        new_size = int(data.replace("set_size_", ""))
-        db.set_setting("scale", new_size)
-        await query.edit_message_text(
-            f"✅ Watermark scale set to: *{new_size}%*",
-            reply_markup=get_size_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif data == "adm_menu_opacity":
-        await query.edit_message_text(
-            "💧 *Select Watermark Opacity:*\n\n"
-            "Choose opacity percentage (100% is completely opaque):",
-            reply_markup=get_opacity_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif data.startswith("set_opac_"):
-        new_opac = int(data.replace("set_opac_", ""))
-        db.set_setting("opacity", new_opac)
-        await query.edit_message_text(
-            f"✅ Watermark opacity set to: *{new_opac}%*",
-            reply_markup=get_opacity_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif data == "adm_menu_pad":
-        await query.edit_message_text(
-            "📏 *Select Edge Margin (Padding):*\n\n"
-            "Distance in pixels from thumbnail edges:",
-            reply_markup=get_padding_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif data.startswith("set_pad_"):
-        new_pad = int(data.replace("set_pad_", ""))
-        db.set_setting("padding", new_pad)
-        await query.edit_message_text(
-            f"✅ Margin set to: *{new_pad}px*",
-            reply_markup=get_padding_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif data == "adm_menu_output":
-        await query.edit_message_text(
-            "📤 *Select Output Format Mode:*\n\n"
-            "Configure how watermarked thumbnails are delivered to users:",
-            reply_markup=get_output_mode_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif data.startswith("set_out_"):
-        new_out = data.replace("set_out_", "")
-        db.set_setting("output_mode", new_out)
-        await query.edit_message_text(
-            f"✅ Output mode updated to: *{new_out.capitalize()}*",
-            reply_markup=get_output_mode_keyboard(),
-            parse_mode="Markdown"
-        )
-
+    # 8. Detailed Statistics
     elif data == "adm_stats":
         stats = db.get_stats()
-        wm_info = watermark_engine.get_watermark_info()
         text = (
-            "📊 *DETAILED SYSTEM STATISTICS*\n"
+            "📊 *MOVIE DOT SYSTEM STATISTICS*\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👥 *Total Registered Users:* `{stats['total_users']}`\n"
-            f"🖼️ *Total Thumbnails Processed:* `{stats['total_processed']}`\n\n"
-            f"🎨 *Active Watermark Details:*\n"
-            f" • File: `{wm_info.get('filename')}`\n"
-            f" • Dimensions: `{wm_info.get('width')} x {wm_info.get('height')} px`\n"
-            f" • Color Mode: `{wm_info.get('mode')}`\n"
-            f" • Format: `{wm_info.get('format')}`\n"
-            f" • Custom: `{'Yes' if wm_info.get('is_custom') else 'Default'}`\n"
+            f"⚡ *Total Files Delivered:* `{stats['total_delivered']}`\n"
+            f"🎬 *Total Movies Indexed:* `{stats['total_movies']}`\n"
+            f"📁 *Total File Qualities:* `{stats['total_files']}`\n"
+            f"📦 *Indexed Storage:* `{movie_engine.format_size(stats['total_size_bytes'])}`\n"
+            f"📢 *Force-Join Channel:* `{stats['force_sub_channel'] or 'None'}`\n"
             "━━━━━━━━━━━━━━━━━━━━━━"
         )
-        back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="adm_main")]])
+        back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="adm_main")]])
         await query.edit_message_text(text, reply_markup=back_kb, parse_mode="Markdown")
 
+    # 9. Broadcast
     elif data == "adm_broadcast":
         db.set_user_state(user_id, "waiting_for_broadcast")
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="adm_main")]])
@@ -356,85 +367,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="Markdown"
         )
 
-    elif data == "adm_confirm_reset":
-        confirm_kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("⚠️ Yes, Reset Everything", callback_data="adm_do_reset"),
-                InlineKeyboardButton("❌ Cancel", callback_data="adm_main")
-            ]
-        ])
-        await query.edit_message_text(
-            "⚠️ *Confirm Reset*\n\n"
-            "Are you sure you want to reset all placement settings and restore the default sample watermark?",
-            reply_markup=confirm_kb,
-            parse_mode="Markdown"
-        )
-
-    elif data == "adm_do_reset":
-        db.reset_settings()
-        watermark_engine.reset_watermark_to_default()
-        await query.edit_message_text(
-            "✅ *All settings and watermark have been reset to default.*",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Return to Admin Panel", callback_data="adm_main")]]),
-            parse_mode="Markdown"
-        )
-
+    # 10. Close
     elif data == "adm_close":
         db.set_user_state(user_id, None)
         await query.message.delete()
-
-
-async def handle_watermark_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /watermark command for both admin and regular users."""
-    user = update.effective_user
-    if is_admin(user.id):
-        wm_info = watermark_engine.get_watermark_info()
-        text = (
-            "🏷️ *ADMIN WATERMARK CONTROL*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• Source: `{'Custom Upload' if wm_info.get('is_custom') else 'Default Sample'}`\n"
-            f"• Resolution: `{wm_info.get('width', 0)} x {wm_info.get('height', 0)} px`\n\n"
-            "Only administrators can change the default watermark and placement settings."
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🖼️ Change Watermark Image", callback_data="adm_change_wm")],
-            [InlineKeyboardButton("📍 Placement & Position", callback_data="adm_menu_pos")],
-            [InlineKeyboardButton("👁️ Preview Placement", callback_data="adm_preview")],
-            [InlineKeyboardButton("🔙 Full Admin Panel", callback_data="adm_main")]
-        ])
-        await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
-    else:
-        wm_info = watermark_engine.get_watermark_info()
-        text = (
-            "🏷️ *DEFAULT WATERMARK INFO*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "The global watermark applied to thumbnails is configured by administrators.\n\n"
-            f"• Watermark Status: `Active ({wm_info.get('width', 0)}x{wm_info.get('height', 0)} px)`\n"
-            "• Every thumbnail you send or attach to a video will automatically have this watermark applied."
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👁️ Preview Watermark Placement", callback_data="user_preview")]
-        ])
-        await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
-
-
-async def handle_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /settings command."""
-    user = update.effective_user
-    if is_admin(user.id):
-        await handle_admin_command(update, context)
-    else:
-        settings = db.get_all_settings()
-        out_mode = settings.get("output_mode", DEFAULT_SETTINGS["output_mode"]).capitalize()
-        text = (
-            "⚙️ *BOT SETTINGS*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• Current Output Delivery: *{out_mode}*\n\n"
-            "Admins manage global placement settings (position, size, opacity).\n"
-            "Tap below to preview how watermarks appear on thumbnails:"
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👁️ Preview Watermark", callback_data="user_preview")],
-            [InlineKeyboardButton("ℹ️ Help & Instructions", callback_data="user_help")]
-        ])
-        await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")

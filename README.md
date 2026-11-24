@@ -1,8 +1,6 @@
-# 🏷️ Telegram Thumbnail & Watermark Bot (with Video Thumbnail Changer)
+# 🎬 MOVIE DOT — Telegram Movie File Management & Delivery Bot
 
-A high-performance, production-ready **Telegram Thumbnail & Watermark Bot** built with Python, `python-telegram-bot`, `Pillow`, and `ffmpeg`.
-
-Designed to watermark YouTube thumbnails, social media images, banners, and **change/watermark MP4 video thumbnails with ZERO video re-encoding**, maintaining **100% of the original video and image quality**.
+A dedicated, high-performance Telegram bot built with Python, `python-telegram-bot` (v22+), and SQLite, designed exclusively for **Movie File Management, Automatic Quality Delivery**, and **Mandatory Channel Subscription (Force Join)**.
 
 ---
 
@@ -10,82 +8,108 @@ Designed to watermark YouTube thumbnails, social media images, banners, and **ch
 
 | Feature | Description |
 | :--- | :--- |
-| 🎬 **Video Thumbnail Changer** | Send any MP4 video directly to the bot. Extract the current thumbnail, replace it with a custom image, and watermark it. |
-| ⚡ **Zero Video Re-encoding** | Uses FFmpeg stream-copy (`-c copy`) so videos are not re-encoded. 100% resolution, bitrate, audio, and quality are preserved. |
-| 📱 **Telegram Command Menu** | Commands appear automatically when users tap `/` in Telegram chat via `setMyCommands`. |
-| 🖼️ **Exact Custom Watermark** | Upload your brand logo/watermark directly in Telegram. Admin controls ensure exact artwork preservation without redesign. |
-| 💎 **Zero Image Quality Loss** | Keeps 100% original dimensions (4K, 1080p, 720p), color profile, and lossless quality. |
-| 📍 **9 Anchor Positions** | Top-Left, Top-Center, Top-Right, Mid-Left, Center, Mid-Right, Bottom-Left, Bottom-Center, Bottom-Right. |
-| 📐 **Customizable Scale & Opacity** | Watermark size (10% to 50%) and opacity (20% to 100%) with live test preview. |
-| 📂 **Stored User Thumbnail** | Users can save a custom thumbnail via `/thumbnail` and attach it to any video with one click. |
-| 🛠️ **Admin Control Panel** | Only `ADMIN_IDS` users can change the default watermark and global placement settings. |
-| ⏰ **24/7 Keep-Alive** | Includes Linux `systemd` service, `Docker`, `docker-compose`, and auto-restart scripts. |
+| 🎬 **Movie File Management** | Add, index, organize, and delete multi-quality movie files (MKV & MP4). |
+| 📥 **GET ALL FILES Deep Linking** | Generates unique deep links (`t.me/bot?start=get_<movie_id>`) connecting channel posts directly to the bot. |
+| 📢 **Mandatory Channel Subscription (Force Join)** | Automatically verifies channel membership via Telegram Bot API `getChatMember` before allowing access to any movie files. |
+| ⚡ **Zero-Bandwidth Instant Delivery** | Delivers original videos and MKV documents using stored Telegram `file_id` values with zero server downloads or re-encoding. |
+| 🔍 **Automatic Quality Detection** | Detects **480p**, **720p**, **1080p**, and **2160p / 4K** from filenames, captions, or video streams. |
+| 🛡️ **Duplicate Prevention** | Enforces unique `file_unique_id` constraints in SQLite to prevent duplicate file entries. |
+| 📱 **Role-Based Home Screen** | Modern welcome screen showing admin controls (`[ 🎬 Manage Movies ]`) exclusively to bot owners. |
+| 🛠️ **Dynamic Channel Configuration** | Admins can set or update the mandatory subscription channel anytime using `/setchannel` or the visual Admin Panel. |
+
+---
+
+## 📱 Bot Home Screen
+
+When users send `/start` without parameters:
+
+```
+🎬 Welcome to MOVIE DOT!
+
+Your Movie File Management Bot.
+```
+
+**Main Menu:**
+- `[ 🎬 Manage Movies ]` *(Visible ONLY to Bot Owner / Admins)*
+- `[ 📥 GET ALL FILES ]`
+- `[ ℹ️ How to Use ]`
+
+---
+
+## 📢 Mandatory Channel Subscription (Force Join) Workflow
+
+1. A user clicks **📥 GET ALL FILES** on a channel post or opens a deep link (`t.me/bot?start=get_418_2026`).
+2. The bot queries the Telegram Bot API to check whether the user is an active member (`member`, `administrator`, or `creator/owner`) of the configured channel.
+3. If the user is **NOT** subscribed, the bot blocks all file access and sends:
+   ```
+   🎬 Welcome to MOVIE DOT!
+
+   ⚠️ Before accessing movie files, you must subscribe to our Telegram channel.
+   ```
+   Buttons:
+   - `[ 📢 JOIN CHANNEL ]` (Opens your official Telegram channel)
+   - `[ ✅ I'VE JOINED – VERIFY ]` (Preserves the requested `movie_id`)
+4. When the user taps **✅ I'VE JOINED – VERIFY**, the bot re-verifies their membership:
+   - **If joined:** Displays confirmation toast and **immediately continues the same movie request** without asking the user to start over!
+   - **If not joined:** Displays an alert prompting them to join first.
+5. The bot presents only the qualities that actually exist:
+   ```
+   🎬 418 (2026)
+
+   📥 Select Your Quality:
+
+   - 480p
+   - 720p
+   - 1080p
+   ```
+6. The user selects a quality, and the bot delivers the file instantly using the stored `file_id`.
 
 ---
 
 ## 📋 Commands Menu
 
-Tap `/` in Telegram to access all registered commands:
-
-- `/start` – Start the bot and display the welcome menu.
-- `/help` – Complete instructions for images and video thumbnails.
-- `/thumbnail` – Upload, view, or change your stored custom thumbnail.
-- `/watermark` – Apply or manage custom watermark (Admin only for changing).
-- `/settings` – Bot settings and delivery preferences.
-- `/cancel` – Cancel any active operation or pending upload.
-- `/admin` – Open visual Admin Panel (Admins only).
-- `/preview` – Preview current watermark placement on a sample 1280x720 canvas.
+- `/start` – Start the bot / access movie deep link.
+- `/help` – Complete instructions on how to use Movie Dot.
+- `/movies` – View all indexed movies, qualities, and deep links (Admin only).
+- `/setchannel <@channel>` – Configure mandatory subscription channel (Admin only).
+- `/admin` – Open interactive Admin Control Panel (Admin only).
+- `/cancel` – Cancel any pending admin input.
 
 ---
 
-## 🎬 How Video Thumbnail Changing Works
+## 🚀 Setup & Deployment Instructions
 
-1. Send an **MP4 video** (up to 20MB) to the bot.
-2. The bot extracts the current thumbnail and presents 3 options:
-   - **✨ Apply My Saved Thumbnail (Watermarked)**: Attaches the thumbnail you saved in your profile.
-   - **🏷️ Watermark Current Thumbnail & Update**: Takes the video's existing thumbnail, applies your watermark, and updates the video.
-   - **📤 Upload New Custom Thumbnail**: Upload any new image to become the video's thumbnail.
-3. The bot attaches the thumbnail to the MP4 container and sends the updated video back, along with the high-resolution watermarked thumbnail file.
-4. **No Re-encoding**: The process takes only a couple of seconds and never degrades video quality.
-
----
-
-## 🚀 Quick Setup & Installation
-
-### Step 1: Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### Step 2: Configure `.env`
-Edit `.env` with your bot token and admin ID:
+### Step 1: Configure `.env`
+Edit `.env` in `telegram-watermark-bot`:
 ```env
-BOT_TOKEN=9086748319:AAG3QmwLIRUuFbLUMkq0QETAVFh0uFoBFlA
-ADMIN_IDS=6160210568
+BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
+ADMIN_IDS=YOUR_TELEGRAM_USER_ID
+
+# Channel username or ID for mandatory subscription (e.g. @MyChannel or -100xxxxxxxxxx)
+CHANNEL_ID=@YourChannel
+
+# Bot username without @
+BOT_USERNAME=Movie_dot_file_bot
 ```
 
-### Step 3: Run the Bot
-- **Windows**:
+### Step 2: Grant Channel Permissions
+Add your bot as an **Administrator** in your Telegram channel with:
+- **Post Messages**
+- **Edit Messages of Others** (to automatically attach `📥 GET ALL FILES` buttons to video uploads)
+- **Invite Users via Link**
+
+### Step 3: Start the Bot
+- **Windows (foreground):**
   ```powershell
-  .\run_bot.bat
-  # or: python bot.py
+  python bot.py
+  # or: .\run_bot.bat
   ```
-- **Linux / VPS**:
+- **Windows 24/7 background:**
+  ```powershell
+  wscript start_background_247.vbs
+  ```
+- **Linux / VPS:**
   ```bash
-  chmod +x run_bot.sh
-  ./run_bot.sh
+  python3 bot.py
+  # or systemd service
   ```
-- **Docker Compose**:
-  ```bash
-  docker-compose up -d --build
-  ```
-
----
-
-## 🧪 Testing
-
-Run both automated test suites to verify all features:
-```bash
-python test_video_and_commands.py
-python test_bot_full.py
-```
